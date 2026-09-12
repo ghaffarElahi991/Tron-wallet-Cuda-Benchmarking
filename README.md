@@ -98,7 +98,9 @@ bash scripts/run_case_insensitive_loose_benchmark.sh 3x5
 ```
 
 Results are written to `results/multi-gpu-4x4-loose.json` or
-`results/multi-gpu-3x5-loose.json`.
+`results/multi-gpu-3x5-loose.json`. The script enables `--debug-math`, which
+prints every probability factor, expected attempts, per-GPU rate equation,
+combined rate, and the mean/median/p95 latency calculations.
 
 ## Run the real GPU benchmark
 

@@ -43,6 +43,7 @@ echo "Running ${pattern_size} case-insensitive benchmark: ^T${prefix}...${suffix
   --suffix "${suffix}" \
   --case-mode ignore \
   --devices all \
+  --debug-math \
   --warmup-seconds 10 \
   --benchmark-seconds 60 \
   --validation-hits 20 \

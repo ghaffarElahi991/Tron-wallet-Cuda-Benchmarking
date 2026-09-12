@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -47,6 +48,7 @@ struct Options {
   std::filesystem::path output = "results/cpp-gpu-live-benchmark.json";
   std::string kernel = TRON_DEFAULT_KERNEL_PATH;
   std::string devices = "all";
+  bool debug_math = false;
 };
 
 struct Throughput {
@@ -93,6 +95,12 @@ struct DeviceBenchmark {
   FullSearch full_search;
 };
 
+struct MathFactor {
+  std::string label;
+  unsigned accepted{};
+  unsigned domain{};
+};
+
 class StartGate {
  public:
   explicit StartGate(std::size_t participants) : participants_(participants) {}
@@ -137,6 +145,7 @@ class StartGate {
       << "  --case-sensitive           Match exact case\n"
       << "  --case-mode MODE           MODE is ignore or exact\n"
       << "  --devices LIST             CUDA ordinals, e.g. 0,1, or all (default all)\n"
+      << "  --debug-math               Print probability and latency calculations\n"
       << "  --warmup-seconds N         GPU warm-up duration (default 10)\n"
       << "  --benchmark-seconds N      Throughput measurement (default 60)\n"
       << "  --validation-prefix P      Easier validation prefix (default derived)\n"
@@ -220,6 +229,8 @@ Options parse_options(int argc, char** argv) {
       options.kernel = require_value(argc, argv, index);
     } else if (argument == "--devices") {
       options.devices = require_value(argc, argv, index);
+    } else if (argument == "--debug-math") {
+      options.debug_math = true;
     } else {
       usage(2, "unknown option: " + argument);
     }
@@ -269,6 +280,36 @@ void device_log(int ordinal, const std::string& message) {
   std::cout << "[GPU " << ordinal << "] " << message << '\n' << std::flush;
 }
 
+std::vector<MathFactor> probability_factors(const Options& options) {
+  const auto prefix = tron::parse_fixed_pattern(options.prefix, options.ignore_case);
+  const auto suffix = tron::parse_fixed_pattern(options.suffix, options.ignore_case);
+  if (prefix.empty()) throw tron::PatternError("prefix must contain at least one token");
+
+  tron::Token second_character_domain = 0;
+  constexpr std::string_view possible_second = "9ABCDEFGHJKLMNPQRSTUVWXYZ";
+  for (const char character : possible_second) {
+    second_character_domain |=
+        tron::Token{1} << static_cast<unsigned>(tron::base58_index(character));
+  }
+
+  std::vector<MathFactor> factors;
+  factors.reserve(prefix.size() + suffix.size());
+  factors.push_back(MathFactor{
+      "prefix[1] immediately after T",
+      static_cast<unsigned>(std::popcount(prefix.front() & second_character_domain)), 25});
+  for (std::size_t index = 1; index < prefix.size(); ++index) {
+    factors.push_back(MathFactor{
+        "prefix[" + std::to_string(index + 1U) + "]",
+        static_cast<unsigned>(std::popcount(prefix[index])), 58});
+  }
+  for (std::size_t index = 0; index < suffix.size(); ++index) {
+    factors.push_back(MathFactor{
+        "suffix[" + std::to_string(index + 1U) + "]",
+        static_cast<unsigned>(std::popcount(suffix[index])), 58});
+  }
+  return factors;
+}
+
 Projection project(const tron::Probability& probability, double rate, double sla_seconds) {
   const auto quantile_seconds = [&](long double quantile) {
     if (probability.probability == 1.0L) return 1.0 / rate;
@@ -287,6 +328,107 @@ Projection project(const tron::Probability& probability, double rate, double sla
                     quantile_seconds(0.95L),
                     quantile_seconds(0.99L),
                     static_cast<double>(sla_probability)};
+}
+
+void print_math_debug(const Options& options,
+                      const std::vector<DeviceBenchmark>& devices,
+                      const Throughput& throughput,
+                      const Projection& projection) {
+  const auto prefix = tron::parse_fixed_pattern(options.prefix, options.ignore_case);
+  const auto suffix = tron::parse_fixed_pattern(options.suffix, options.ignore_case);
+  const auto factors = probability_factors(options);
+  const std::size_t middle_characters =
+      34U - 1U - prefix.size() - suffix.size();
+
+  long double calculated_probability = 1.0L;
+  std::ostringstream formula;
+  formula << "1";
+  for (const auto& factor : factors) {
+    calculated_probability *=
+        static_cast<long double>(factor.accepted) /
+        static_cast<long double>(factor.domain);
+    formula << " * (" << factor.accepted << '/' << factor.domain << ')';
+  }
+  formula << " * 1";
+
+  const long double difference =
+      std::abs(calculated_probability - projection.probability);
+  const long double tolerance =
+      std::max(1e-30L, std::abs(projection.probability) * 1e-15L);
+
+  std::cout << "\n========== MATH DEBUG ==========\n"
+            << "Address layout     : T(1) + prefix(" << prefix.size()
+            << ") + middle(" << middle_characters << ") + suffix("
+            << suffix.size() << ") = 34 characters\n"
+            << "Base58 alphabet    : 58 symbols\n"
+            << "Second-char domain : 25 symbols (simplified TRON model)\n"
+            << "Case mode          : "
+            << (options.ignore_case ? "case-insensitive" : "case-sensitive")
+            << "\n\nProbability factors:\n"
+            << "  leading T                     = 1 (always present)\n";
+  for (const auto& factor : factors) {
+    std::cout << "  " << std::left << std::setw(29) << factor.label << std::right
+              << " = " << factor.accepted << '/' << factor.domain;
+    if (factor.accepted == factor.domain) std::cout << " = 1 (unrestricted)";
+    std::cout << '\n';
+  }
+  std::cout << "  middle[" << middle_characters
+            << "] unrestricted          = 1\n"
+            << "\nProbability:\n"
+            << "  p = " << formula.str() << '\n'
+            << std::scientific << std::setprecision(12)
+            << "  p = " << calculated_probability << " per candidate\n"
+            << std::fixed << std::setprecision(3)
+            << "  E = 1 / p = " << projection.attempts << " attempts\n"
+            << "  Probability-model check = "
+            << (difference <= tolerance ? "PASS" : "FAIL") << "\n\n"
+            << "Measured throughput:\n";
+
+  for (const auto& device : devices) {
+    std::cout << "  R_gpu" << device.gpu.ordinal << " = "
+              << device.throughput.candidates << " / "
+              << device.throughput.seconds << " = "
+              << device.throughput.rate << " addr/s\n";
+  }
+  std::cout << "  R_total = ";
+  for (std::size_t index = 0; index < devices.size(); ++index) {
+    if (index != 0U) std::cout << " + ";
+    std::cout << devices[index].throughput.rate;
+  }
+  std::cout << " = " << throughput.rate << " addr/s\n\n"
+            << "CUDA observation batches:\n";
+  for (const auto& device : devices) {
+    const std::uint64_t candidates_per_launch =
+        static_cast<std::uint64_t>(device.chains) *
+        static_cast<std::uint64_t>(device.steps);
+    const double approximate_launch_seconds =
+        static_cast<double>(candidates_per_launch) / device.throughput.rate;
+    const long double expected_hits_per_launch =
+        static_cast<long double>(candidates_per_launch) * projection.probability;
+    std::cout << "  GPU " << device.gpu.ordinal << ": "
+              << candidates_per_launch << " candidates/launch, approximately "
+              << approximate_launch_seconds << "s/launch, expected hits/launch = "
+              << static_cast<double>(expected_hits_per_launch) << '\n';
+  }
+  std::cout << "  Note: E/R assumes candidates are observed continuously; live detection\n"
+            << "        is returned at a CUDA launch boundary and can be batch-limited.\n\n"
+            << "Latency projection:\n"
+            << "  mean   = E / R_total = " << projection.attempts << " / "
+            << throughput.rate << " = " << projection.mean << " seconds\n";
+  if (projection.probability < 1.0L) {
+    std::cout << "  median = ceil(ln(1-0.50) / ln(1-p)) / R_total = "
+              << projection.median << " seconds\n"
+              << "  p95    = ceil(ln(1-0.95) / ln(1-p)) / R_total = "
+              << projection.p95 << " seconds\n";
+  } else {
+    std::cout << "  median = one attempt / R_total = " << projection.median
+              << " seconds\n"
+              << "  p95    = one attempt / R_total = " << projection.p95
+              << " seconds\n";
+  }
+  std::cout << "  P(hit <= " << options.sla_seconds << "s) = "
+            << projection.probability_within_sla * 100.0 << "%\n"
+            << "================================\n" << std::defaultfloat;
 }
 
 int calibrate_steps(tron::GpuRunner& runner) {
@@ -780,6 +922,9 @@ int main(int argc, char** argv) {
       std::cout << "Full pattern trial : "
                 << (full_search.found ? "verified hit" : "no hit before timeout")
                 << " after " << full_search.seconds << " seconds\n";
+    }
+    if (options.debug_math) {
+      print_math_debug(options, devices, throughput, projection);
     }
     std::cout << "Result             : " << options.output.string() << "\n";
     return 0;
