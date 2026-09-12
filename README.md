@@ -87,6 +87,19 @@ chains. GPU workers run in parallel host threads. The report contains each
 device's measured rate and uses the sum of those rates for the projected search
 times. Use `--devices 0` when a single-GPU baseline is required.
 
+The convenience script requires the pattern size as its argument:
+
+```bash
+# Prefix AB?? (4), suffix XY?? (4)
+bash scripts/run_case_insensitive_loose_benchmark.sh 4x4
+
+# Prefix AB? (3), suffix XYZ?? (5)
+bash scripts/run_case_insensitive_loose_benchmark.sh 3x5
+```
+
+Results are written to `results/multi-gpu-4x4-loose.json` or
+`results/multi-gpu-3x5-loose.json`.
+
 ## Run the real GPU benchmark
 
 The RTX benchmark worker is now included. It uses the full TRON pipeline on the
