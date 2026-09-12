@@ -23,6 +23,7 @@ struct MatchRecord {
 static_assert(sizeof(MatchRecord) == 56, "CUDA match ABI changed");
 
 struct GpuInfo {
+  int ordinal{};
   std::string name;
   int major{};
   int minor{};
@@ -38,7 +39,7 @@ struct LaunchResult {
 
 class CudaContext {
  public:
-  CudaContext();
+  explicit CudaContext(int device_ordinal = 0);
   ~CudaContext();
   CudaContext(const CudaContext&) = delete;
   CudaContext& operator=(const CudaContext&) = delete;
@@ -51,6 +52,8 @@ class CudaContext {
   CUcontext context_{};
   GpuInfo info_;
 };
+
+int cuda_device_count();
 
 class GpuRunner {
  public:

@@ -7,17 +7,22 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -25,6 +30,7 @@ namespace {
 constexpr int kThreadsPerBlock = 64;
 constexpr int kBlocksPerSm = 4;
 constexpr std::uint32_t kMaxMatches = 64;
+std::mutex output_mutex;
 
 struct Options {
   std::string prefix;
@@ -40,12 +46,7 @@ struct Options {
   double sla_seconds = 30.0;
   std::filesystem::path output = "results/cpp-gpu-live-benchmark.json";
   std::string kernel = TRON_DEFAULT_KERNEL_PATH;
-  std::vector<std::string> loose_rules;
-};
-
-struct EffectivePattern {
-  std::string prefix;
-  std::string suffix;
+  std::string devices = "all";
 };
 
 struct Throughput {
@@ -80,20 +81,62 @@ struct FullSearch {
   std::string address;
 };
 
+struct DeviceBenchmark {
+  tron::GpuInfo gpu;
+  double tuning_rate_16{};
+  double tuning_rate_8{};
+  int points_per_thread{};
+  std::size_t chains{};
+  int steps{};
+  Throughput throughput;
+  Validation validation;
+  FullSearch full_search;
+};
+
+class StartGate {
+ public:
+  explicit StartGate(std::size_t participants) : participants_(participants) {}
+
+  bool arrive_and_wait() {
+    std::unique_lock lock(mutex_);
+    ++ready_;
+    if (ready_ == participants_) {
+      released_ = true;
+      condition_.notify_all();
+    } else {
+      condition_.wait(lock, [&] { return released_ || cancelled_; });
+    }
+    return !cancelled_;
+  }
+
+  void cancel() {
+    std::lock_guard lock(mutex_);
+    cancelled_ = true;
+    condition_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t participants_{};
+  std::size_t ready_{};
+  bool released_{};
+  bool cancelled_{};
+};
+
 [[noreturn]] void usage(int status, std::string_view error = {}) {
   std::ostream& stream = status == 0 ? std::cout : std::cerr;
   if (!error.empty()) stream << "error: " << error << "\n\n";
   stream
       << "Usage: tron_gpu_benchmark --prefix PATTERN --suffix PATTERN [options]\n\n"
-      << "Required 4x6 pattern syntax: Base58 literals, ? wildcards, [abc] classes.\n"
+      << "Pattern capacity: up to 4 prefix and 6 suffix tokens.\n"
+      << "Syntax: Base58 literals, ? wildcards, and [abc] classes.\n"
       << "The prefix starts after TRON's invariant leading T.\n\n"
       << "Options:\n"
       << "  --ignore-case              Match ASCII letter case (default)\n"
       << "  --case-sensitive           Match exact case\n"
       << "  --case-mode MODE           MODE is ignore or exact\n"
-      << "  --loose-rule RULE          Repeatable position override; examples:\n"
-      << "                              prefix:4=?\n"
-      << "                              suffix:6=[SsZz]\n"
+      << "  --devices LIST             CUDA ordinals, e.g. 0,1, or all (default all)\n"
       << "  --warmup-seconds N         GPU warm-up duration (default 10)\n"
       << "  --benchmark-seconds N      Throughput measurement (default 60)\n"
       << "  --validation-prefix P      Easier validation prefix (default derived)\n"
@@ -155,10 +198,7 @@ Options parse_options(int argc, char** argv) {
       if (mode == "ignore" || mode == "insensitive") options.ignore_case = true;
       else if (mode == "exact" || mode == "sensitive") options.ignore_case = false;
       else usage(2, "--case-mode must be ignore or exact");
-    } else if (argument == "--loose-rule") {
-      options.loose_rules.push_back(require_value(argc, argv, index));
-    }
-    else if (argument == "--warmup-seconds") {
+    } else if (argument == "--warmup-seconds") {
       options.warmup_seconds = parse_double(require_value(argc, argv, index), argument);
     } else if (argument == "--benchmark-seconds") {
       options.benchmark_seconds = parse_double(require_value(argc, argv, index), argument);
@@ -178,6 +218,8 @@ Options parse_options(int argc, char** argv) {
       options.output = require_value(argc, argv, index);
     } else if (argument == "--kernel") {
       options.kernel = require_value(argc, argv, index);
+    } else if (argument == "--devices") {
+      options.devices = require_value(argc, argv, index);
     } else {
       usage(2, "unknown option: " + argument);
     }
@@ -193,75 +235,38 @@ Options parse_options(int argc, char** argv) {
   return options;
 }
 
-std::vector<std::string> split_pattern_tokens(std::string_view pattern,
-                                              bool ignore_case) {
-  // Validate with the canonical parser first, then retain each token's source
-  // spelling so unmodified positions remain readable in reports.
-  const auto parsed = tron::parse_fixed_pattern(pattern, ignore_case);
-  std::vector<std::string> tokens;
-  tokens.reserve(parsed.size());
-  for (std::size_t index = 0; index < pattern.size();) {
-    if (pattern[index] == '[') {
-      const std::size_t close = pattern.find(']', index + 1U);
-      tokens.emplace_back(pattern.substr(index, close - index + 1U));
-      index = close + 1U;
-    } else {
-      tokens.emplace_back(1, pattern[index]);
-      ++index;
-    }
-  }
-  return tokens;
-}
-
-std::string join_pattern_tokens(const std::vector<std::string>& tokens) {
-  std::string result;
-  for (const auto& token : tokens) result += token;
-  return result;
-}
-
-EffectivePattern apply_loose_rules(const Options& options) {
-  auto prefix = split_pattern_tokens(options.prefix, options.ignore_case);
-  auto suffix = split_pattern_tokens(options.suffix, options.ignore_case);
-
-  for (const std::string& rule : options.loose_rules) {
-    const std::size_t colon = rule.find(':');
-    const std::size_t equals = rule.find('=', colon == std::string::npos ? 0U : colon + 1U);
-    if (colon == std::string::npos || equals == std::string::npos ||
-        colon == 0U || equals <= colon + 1U || equals + 1U >= rule.size()) {
-      throw tron::PatternError(
-          "invalid --loose-rule; use prefix:N=? or suffix:N=[characters]");
-    }
-
-    const std::string area = rule.substr(0, colon);
-    const std::string position_text = rule.substr(colon + 1U, equals - colon - 1U);
-    const std::string replacement = rule.substr(equals + 1U);
-    std::size_t used = 0;
-    unsigned long position = 0;
-    try {
-      position = std::stoul(position_text, &used);
-    } catch (const std::exception&) {
-      throw tron::PatternError("loose-rule position must be a positive integer");
-    }
-    if (used != position_text.size() || position == 0U) {
-      throw tron::PatternError("loose-rule position must be a positive integer");
-    }
-    const auto replacement_tokens =
-        tron::parse_fixed_pattern(replacement, options.ignore_case);
-    if (replacement_tokens.size() != 1U) {
-      throw tron::PatternError("a loose-rule replacement must consume exactly one character");
-    }
-
-    std::vector<std::string>* target = nullptr;
-    if (area == "prefix") target = &prefix;
-    else if (area == "suffix") target = &suffix;
-    else throw tron::PatternError("loose-rule area must be prefix or suffix");
-    if (position > target->size()) {
-      throw tron::PatternError("loose-rule position is outside the selected pattern");
-    }
-    (*target)[position - 1U] = replacement;
+std::vector<int> parse_device_ordinals(std::string_view selection, int available) {
+  if (available < 1) throw std::runtime_error("no CUDA GPU detected");
+  std::vector<int> devices;
+  if (selection == "all") {
+    devices.reserve(static_cast<std::size_t>(available));
+    for (int ordinal = 0; ordinal < available; ++ordinal) devices.push_back(ordinal);
+    return devices;
   }
 
-  return EffectivePattern{join_pattern_tokens(prefix), join_pattern_tokens(suffix)};
+  std::size_t start = 0;
+  while (start <= selection.size()) {
+    const std::size_t comma = selection.find(',', start);
+    const std::size_t end = comma == std::string_view::npos ? selection.size() : comma;
+    if (end == start) usage(2, "--devices contains an empty device ordinal");
+    const int ordinal = parse_int(std::string(selection.substr(start, end - start)), "--devices");
+    if (ordinal < 0 || ordinal >= available) {
+      usage(2, "--devices ordinal is outside the visible CUDA device range");
+    }
+    if (std::find(devices.begin(), devices.end(), ordinal) != devices.end()) {
+      usage(2, "--devices contains a duplicate device ordinal");
+    }
+    devices.push_back(ordinal);
+    if (comma == std::string_view::npos) break;
+    start = comma + 1U;
+  }
+  if (devices.empty()) usage(2, "--devices requires all or a comma-separated list");
+  return devices;
+}
+
+void device_log(int ordinal, const std::string& message) {
+  std::lock_guard lock(output_mutex);
+  std::cout << "[GPU " << ordinal << "] " << message << '\n' << std::flush;
 }
 
 Projection project(const tron::Probability& probability, double rate, double sla_seconds) {
@@ -365,13 +370,18 @@ Validation validate(tron::GpuRunner& runner, const tron::StartPoints& points,
 FullSearch search_requested(tron::GpuRunner& runner, const tron::StartPoints& points,
                             const tron::PatternParams& pattern, std::string_view prefix,
                             std::string_view suffix, bool ignore_case, int steps,
-                            double timeout_seconds) {
+                            double timeout_seconds,
+                            std::atomic<bool>* another_device_found = nullptr) {
   FullSearch result;
   if (timeout_seconds <= 0) return result;
   result.attempted = true;
   runner.set_pattern(pattern);
   const auto started = std::chrono::steady_clock::now();
   while (true) {
+    if (another_device_found != nullptr &&
+        another_device_found->load(std::memory_order_acquire)) {
+      break;
+    }
     result.seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     if (result.seconds >= timeout_seconds) break;
@@ -383,12 +393,121 @@ FullSearch search_requested(tron::GpuRunner& runner, const tron::StartPoints& po
       result.verified =
           verify_records(runner, points, launch.records, prefix, suffix, ignore_case) > 0;
       result.found = result.verified;
-      if (result.found) result.address.assign(launch.records.front().address, 34);
+      if (result.found) {
+        result.address.assign(launch.records.front().address, 34);
+        if (another_device_found != nullptr) {
+          another_device_found->store(true, std::memory_order_release);
+        }
+      }
       break;
     }
   }
   result.seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  return result;
+}
+
+DeviceBenchmark benchmark_device(const Options& options,
+                                 const tron::PatternParams& requested,
+                                 const tron::PatternParams& validation_pattern,
+                                 std::string_view validation_prefix,
+                                 std::string_view validation_suffix,
+                                 int validation_hits, int ordinal,
+                                 StartGate& throughput_gate,
+                                 std::atomic<bool>& full_search_stop) {
+  DeviceBenchmark result;
+  tron::CudaContext context(ordinal);
+  result.gpu = context.info();
+
+  {
+    std::ostringstream message;
+    message << result.gpu.name << "; architecture sm_" << result.gpu.major
+            << result.gpu.minor << "; " << result.gpu.sm_count << " SMs";
+    device_log(ordinal, message.str());
+  }
+
+  result.tuning_rate_16 =
+      tron::tune_points_per_thread(context, options.kernel, requested, 16);
+  {
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(3) << "M=16: "
+            << result.tuning_rate_16 / 1e6 << " M addr/s tuning sample";
+    device_log(ordinal, message.str());
+  }
+  result.tuning_rate_8 =
+      tron::tune_points_per_thread(context, options.kernel, requested, 8);
+  {
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(3) << "M=8: "
+            << result.tuning_rate_8 / 1e6 << " M addr/s tuning sample";
+    device_log(ordinal, message.str());
+  }
+
+  result.points_per_thread =
+      result.tuning_rate_16 >= result.tuning_rate_8 ? 16 : 8;
+  const int blocks = result.gpu.sm_count * kBlocksPerSm;
+  result.chains = static_cast<std::size_t>(blocks) * kThreadsPerBlock *
+                  static_cast<std::size_t>(result.points_per_thread);
+  {
+    std::ostringstream message;
+    message << "Preparing " << result.chains << " independent GPU chains...";
+    device_log(ordinal, message.str());
+  }
+
+  auto points = tron::create_start_points(result.chains, true);
+  tron::GpuRunner runner(context, options.kernel, result.points_per_thread, blocks,
+                         points.x, points.y);
+  runner.set_pattern(requested);
+  result.steps = calibrate_steps(runner);
+  {
+    std::ostringstream message;
+    message << "Selected M=" << result.points_per_thread << "; " << result.chains
+            << " chains; " << result.steps << " steps/launch";
+    device_log(ordinal, message.str());
+  }
+
+  {
+    std::ostringstream message;
+    message << "Warming GPU for " << options.warmup_seconds << " seconds...";
+    device_log(ordinal, message.str());
+  }
+  timed_throughput(runner, result.steps, options.warmup_seconds);
+  device_log(ordinal, "Ready for synchronized multi-GPU measurement.");
+  if (!throughput_gate.arrive_and_wait()) {
+    throw std::runtime_error("multi-GPU measurement cancelled after another device failed");
+  }
+  {
+    std::ostringstream message;
+    message << "Measuring sustained throughput for " << options.benchmark_seconds
+            << " seconds...";
+    device_log(ordinal, message.str());
+  }
+  result.throughput =
+      timed_throughput(runner, result.steps, options.benchmark_seconds);
+
+  {
+    std::ostringstream message;
+    message << "Validating ^T" << validation_prefix << "..." << validation_suffix
+            << "$ (up to " << options.validation_timeout << "s)...";
+    device_log(ordinal, message.str());
+  }
+  result.validation =
+      validate(runner, points, validation_pattern, validation_prefix,
+               validation_suffix, options.ignore_case, result.steps,
+               validation_hits, options.validation_timeout);
+  result.full_search =
+      search_requested(runner, points, requested, options.prefix, options.suffix,
+                       options.ignore_case, result.steps,
+                       options.full_search_seconds, &full_search_stop);
+  points.wipe_private_keys();
+
+  {
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(3) << "Completed: "
+            << result.throughput.rate / 1e6 << " M addr/s; validation "
+            << result.validation.verified << "/" << result.validation.hits;
+    device_log(ordinal, message.str());
+  }
   return result;
 }
 
@@ -442,39 +561,64 @@ void write_private_json(const std::filesystem::path& path, const std::string& co
   if (::close(descriptor) != 0) throw std::runtime_error("cannot close result file");
 }
 
-std::string build_json(const Options& options, const tron::GpuInfo& gpu,
-                       std::string_view effective_prefix,
-                       std::string_view effective_suffix, int points_per_thread,
-                       std::size_t chains, int steps,
+std::string build_json(const Options& options,
+                       const std::vector<DeviceBenchmark>& devices,
                        const Throughput& throughput, const Projection& projection,
                        std::string_view validation_prefix, std::string_view validation_suffix,
                        const Validation& validation, const FullSearch& full_search) {
   std::ostringstream json;
   json << std::setprecision(17);
   json << "{\n"
-       << "  \"schema_version\": 4,\n"
-       << "  \"implementation\": \"c++20-cuda-driver-nvrtc\",\n"
+       << "  \"schema_version\": 6,\n"
+       << "  \"implementation\": \"c++20-cuda-driver-nvrtc-multi-gpu\",\n"
        << "  \"timestamp_utc\": \"" << timestamp_utc() << "\",\n"
-       << "  \"gpu\": {\"name\": \"" << json_escape(gpu.name)
-       << "\", \"cuda_driver_api_version\": " << gpu.cuda_driver_api_version << "},\n"
-       << "  \"cuda_architecture\": \"sm_" << gpu.major << gpu.minor << "\",\n"
-       << "  \"sm_count\": " << gpu.sm_count << ",\n"
-       << "  \"points_per_thread\": " << points_per_thread << ",\n"
-       << "  \"chains\": " << chains << ",\n"
-       << "  \"steps_per_launch\": " << steps << ",\n"
-       << "  \"requested_pattern\": {\"base_prefix_after_t\": \""
-       << json_escape(options.prefix) << "\", \"base_suffix\": \""
-       << json_escape(options.suffix) << "\", \"prefix_after_t\": \""
-       << json_escape(effective_prefix) << "\", \"suffix\": \""
-       << json_escape(effective_suffix) << "\", \"ignore_case\": "
-       << (options.ignore_case ? "true" : "false") << ", \"loose_rules\": [";
-  for (std::size_t index = 0; index < options.loose_rules.size(); ++index) {
-    if (index != 0U) json << ", ";
-    json << "\"" << json_escape(options.loose_rules[index]) << "\"";
+       << "  \"device_count\": " << devices.size() << ",\n"
+       << "  \"devices\": [\n";
+  for (std::size_t index = 0; index < devices.size(); ++index) {
+    const auto& device = devices[index];
+    json << "    {\"ordinal\": " << device.gpu.ordinal
+         << ", \"name\": \"" << json_escape(device.gpu.name)
+         << "\", \"cuda_driver_api_version\": "
+         << device.gpu.cuda_driver_api_version
+         << ", \"cuda_architecture\": \"sm_" << device.gpu.major
+         << device.gpu.minor << "\", \"sm_count\": " << device.gpu.sm_count
+         << ", \"points_per_thread\": " << device.points_per_thread
+         << ", \"chains\": " << device.chains
+         << ", \"steps_per_launch\": " << device.steps
+         << ", \"tuning_million_addresses_per_second\": {\"m16\": "
+         << device.tuning_rate_16 / 1e6 << ", \"m8\": "
+         << device.tuning_rate_8 / 1e6 << "}"
+         << ", \"throughput\": {\"candidates\": "
+         << device.throughput.candidates << ", \"elapsed_seconds\": "
+         << device.throughput.seconds
+         << ", \"full_tron_addresses_per_second\": "
+         << device.throughput.rate
+         << ", \"million_addresses_per_second\": "
+         << device.throughput.rate / 1e6 << "}"
+         << ", \"validation\": {\"hits\": " << device.validation.hits
+         << ", \"verified_hits\": " << device.validation.verified
+         << ", \"candidates\": " << device.validation.candidates
+         << ", \"elapsed_seconds\": " << device.validation.seconds << "}"
+         << ", \"full_search\": {\"attempted\": "
+         << (device.full_search.attempted ? "true" : "false")
+         << ", \"found\": " << (device.full_search.found ? "true" : "false")
+         << ", \"verified\": "
+         << (device.full_search.verified ? "true" : "false")
+         << ", \"candidates\": " << device.full_search.candidates
+         << ", \"elapsed_seconds\": " << device.full_search.seconds
+         << ", \"public_address\": ";
+    if (device.full_search.address.empty()) json << "null";
+    else json << "\"" << json_escape(device.full_search.address) << "\"";
+    json << "}}" << (index + 1U == devices.size() ? "\n" : ",\n");
   }
-  json << "]},\n"
-       << "  \"throughput\": {\"candidates\": " << throughput.candidates
-       << ", \"elapsed_seconds\": " << throughput.seconds
+  json << "  ],\n"
+       << "  \"requested_pattern\": {\"prefix_after_t\": \""
+       << json_escape(options.prefix) << "\", \"suffix\": \""
+       << json_escape(options.suffix) << "\", \"ignore_case\": "
+       << (options.ignore_case ? "true" : "false") << "},\n"
+       << "  \"throughput\": {\"aggregation\": \"sum_of_device_rates\""
+       << ", \"candidates\": " << throughput.candidates
+       << ", \"rate_equivalent_elapsed_seconds\": " << throughput.seconds
        << ", \"full_tron_addresses_per_second\": " << throughput.rate
        << ", \"million_addresses_per_second\": " << throughput.rate / 1e6 << "},\n"
        << "  \"projection\": {\"probability_model\": "
@@ -514,78 +658,103 @@ std::string build_json(const Options& options, const tron::GpuInfo& gpu,
 int main(int argc, char** argv) {
   try {
     const Options options = parse_options(argc, argv);
-    const EffectivePattern effective = apply_loose_rules(options);
-    const auto requested = tron::compile_pattern(effective.prefix, effective.suffix,
-                                                 options.ignore_case, true);
+    const auto requested = tron::compile_pattern(options.prefix, options.suffix,
+                                                 options.ignore_case, false);
     const auto probability = tron::match_probability_simplified(
-        effective.prefix, effective.suffix, options.ignore_case);
+        options.prefix, options.suffix, options.ignore_case);
     const std::string validation_prefix =
         options.validation_prefix.empty()
-            ? tron::representative_literals(effective.prefix, options.ignore_case, 2, true)
+            ? tron::representative_literals(options.prefix, options.ignore_case, 2, true)
             : options.validation_prefix;
     const std::string validation_suffix =
         options.validation_suffix.empty()
-            ? tron::representative_literals(effective.suffix, options.ignore_case, 3)
+            ? tron::representative_literals(options.suffix, options.ignore_case, 3)
             : options.validation_suffix;
     const auto validation_pattern = tron::compile_pattern(
         validation_prefix, validation_suffix, options.ignore_case, false);
 
-    tron::CudaContext context;
-    const auto& gpu = context.info();
-    std::cout << "GPU: " << gpu.name << "; architecture sm_" << gpu.major << gpu.minor
-              << "; " << gpu.sm_count << " SMs\n";
-    const double rate16 =
-        tron::tune_points_per_thread(context, options.kernel, requested, 16);
-    std::cout << "M=16: " << std::fixed << std::setprecision(3) << rate16 / 1e6
-              << " M addr/s tuning sample\n";
-    const double rate8 = tron::tune_points_per_thread(context, options.kernel, requested, 8);
-    std::cout << "M=8: " << rate8 / 1e6 << " M addr/s tuning sample\n";
-    const int points_per_thread = rate16 >= rate8 ? 16 : 8;
-    const int blocks = gpu.sm_count * kBlocksPerSm;
-    const std::size_t chains = static_cast<std::size_t>(blocks) * kThreadsPerBlock *
-                               static_cast<std::size_t>(points_per_thread);
+    const int available_devices = tron::cuda_device_count();
+    const std::vector<int> ordinals =
+        parse_device_ordinals(options.devices, available_devices);
+    std::cout << "Using " << ordinals.size() << " of " << available_devices
+              << " visible CUDA GPU(s): ";
+    for (std::size_t index = 0; index < ordinals.size(); ++index) {
+      if (index != 0U) std::cout << ',';
+      std::cout << ordinals[index];
+    }
+    std::cout << '\n';
 
-    std::cout << "Preparing " << chains << " independent GPU chains...\n";
-    auto points = tron::create_start_points(chains, true);
-    tron::GpuRunner runner(context, options.kernel, points_per_thread, blocks, points.x,
-                           points.y);
-    runner.set_pattern(requested);
-    const int steps = calibrate_steps(runner);
-    std::cout << "Selected M=" << points_per_thread << "; " << chains
-              << " chains; " << steps << " steps/launch\n";
+    std::vector<DeviceBenchmark> devices(ordinals.size());
+    std::vector<std::exception_ptr> failures(ordinals.size());
+    std::vector<std::thread> workers;
+    StartGate throughput_gate(ordinals.size());
+    std::atomic<bool> full_search_stop{false};
+    workers.reserve(ordinals.size());
+    const int validation_hits_per_device = std::max(
+        1, (options.validation_hits + static_cast<int>(ordinals.size()) - 1) /
+               static_cast<int>(ordinals.size()));
+    for (std::size_t index = 0; index < ordinals.size(); ++index) {
+      workers.emplace_back([&, index] {
+        try {
+          devices[index] = benchmark_device(
+              options, requested, validation_pattern, validation_prefix,
+              validation_suffix, validation_hits_per_device, ordinals[index],
+              throughput_gate, full_search_stop);
+        } catch (...) {
+          failures[index] = std::current_exception();
+          throughput_gate.cancel();
+        }
+      });
+    }
+    for (auto& worker : workers) worker.join();
+    for (std::size_t index = 0; index < failures.size(); ++index) {
+      if (!failures[index]) continue;
+      try {
+        std::rethrow_exception(failures[index]);
+      } catch (const std::exception& error) {
+        throw std::runtime_error("GPU " + std::to_string(ordinals[index]) +
+                                 " failed: " + error.what());
+      } catch (...) {
+        throw std::runtime_error("GPU " + std::to_string(ordinals[index]) +
+                                 " failed with an unknown error");
+      }
+    }
 
-    std::cout << "Warming GPU for " << options.warmup_seconds << " seconds...\n";
-    timed_throughput(runner, steps, options.warmup_seconds);
-    std::cout << "Measuring sustained throughput for " << options.benchmark_seconds
-              << " seconds...\n";
-    const Throughput throughput =
-        timed_throughput(runner, steps, options.benchmark_seconds);
+    Throughput throughput;
+    Validation validation;
+    FullSearch full_search;
+    full_search.attempted = options.full_search_seconds > 0;
+    double earliest_found = std::numeric_limits<double>::infinity();
+    for (const auto& device : devices) {
+      throughput.rate += device.throughput.rate;
+      throughput.candidates += device.throughput.candidates;
+      validation.candidates += device.validation.candidates;
+      validation.hits += device.validation.hits;
+      validation.verified += device.validation.verified;
+      validation.seconds = std::max(validation.seconds, device.validation.seconds);
+      full_search.candidates += device.full_search.candidates;
+      full_search.seconds = std::max(full_search.seconds, device.full_search.seconds);
+      if (device.full_search.found && device.full_search.seconds < earliest_found) {
+        earliest_found = device.full_search.seconds;
+        full_search.found = true;
+        full_search.verified = device.full_search.verified;
+        full_search.address = device.full_search.address;
+      }
+    }
+    throughput.seconds = throughput.rate > 0
+                             ? static_cast<double>(throughput.candidates) /
+                                   throughput.rate
+                             : 0.0;
+    if (full_search.found) full_search.seconds = earliest_found;
     const Projection projection =
         project(probability, throughput.rate, options.sla_seconds);
 
-    std::cout << "Validating real matches with ^T" << validation_prefix << "..."
-              << validation_suffix << "$ (up to " << options.validation_timeout
-              << "s)...\n";
-    const Validation validation =
-        validate(runner, points, validation_pattern, validation_prefix, validation_suffix,
-                 options.ignore_case, steps, options.validation_hits,
-                 options.validation_timeout);
-    const FullSearch full_search = search_requested(
-        runner, points, requested, effective.prefix, effective.suffix, options.ignore_case,
-        steps, options.full_search_seconds);
-
     write_private_json(
         options.output,
-        build_json(options, gpu, effective.prefix, effective.suffix, points_per_thread,
-                   chains, steps, throughput, projection, validation_prefix,
+        build_json(options, devices, throughput, projection, validation_prefix,
                    validation_suffix, validation, full_search));
-    points.wipe_private_keys();
 
-    if (!options.loose_rules.empty()) {
-      std::cout << "\nBase pattern      : ^T" << options.prefix << "..." << options.suffix
-                << "$\n";
-    }
-    std::cout << "\nRequested pattern : ^T" << effective.prefix << "..." << effective.suffix
+    std::cout << "\nRequested pattern : ^T" << options.prefix << "..." << options.suffix
               << "$ (" << (options.ignore_case ? "case-insensitive" : "case-sensitive")
               << ")\n"
               << "Probability model : 1/25 second character; allowed-cases/58 later\n"
@@ -593,7 +762,12 @@ int main(int argc, char** argv) {
               << "Match chance      : " << projection.probability << " per candidate\n"
               << std::fixed << std::setprecision(3)
               << "Expected attempts : " << projection.attempts << " addresses\n"
-              << "Measured GPU rate : " << throughput.rate / 1e6
+              << "GPU count         : " << devices.size() << "\n";
+    for (const auto& device : devices) {
+      std::cout << "GPU " << device.gpu.ordinal << " rate        : "
+                << device.throughput.rate / 1e6 << " M full TRON addr/s\n";
+    }
+    std::cout << "Combined GPU rate : " << throughput.rate / 1e6
               << " M full TRON addr/s\n"
               << "Projected mean    : " << projection.mean << " seconds\n"
               << "Mean hours        : " << projection.mean / 3600.0 << " hours\n"
@@ -603,7 +777,7 @@ int main(int argc, char** argv) {
               << "Validation         : " << validation.verified << "/" << validation.hits
               << " GPU hits verified on CPU\n";
     if (full_search.attempted) {
-      std::cout << "Full 4x6 trial     : "
+      std::cout << "Full pattern trial : "
                 << (full_search.found ? "verified hit" : "no hit before timeout")
                 << " after " << full_search.seconds << " seconds\n";
     }

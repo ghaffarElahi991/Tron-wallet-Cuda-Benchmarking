@@ -45,30 +45,47 @@ as `L/l` do not incorrectly receive a two-case factor. For this target the model
 is exactly `p = 1 / (25 * 29^9)` and
 `E = 362,678,649,396,725` addresses. The measured GPU rate remains dynamic.
 
-### Configurable loose rules
+### Direct loose patterns
 
 Case handling can be selected explicitly with `--case-mode ignore` or
 `--case-mode exact` (`--ignore-case` and `--case-sensitive` remain supported).
-Use repeatable, one-based `--loose-rule` overrides to loosen individual prefix
-or suffix positions while retaining the original base pattern in the report:
+Put `?` wildcards or `[abc]` character classes directly in the prefix and
+suffix arguments:
 
 ```bash
 build/cpp/tron_gpu_benchmark \
-  --prefix NewW \
-  --suffix adreSS \
+  --prefix 'AB??' \
+  --suffix 'XYZ???' \
   --case-mode ignore \
-  --loose-rule 'prefix:4=?' \
-  --loose-rule 'suffix:4=?' \
-  --loose-rule 'suffix:6=?' \
-  --output results/rtx4050-TNewW-adreSS-multi-loose.json
+  --output results/rtx4050-AB-XYZ-loose.json
 ```
 
-This produces the effective fixed-width pattern `^TNew?...adr?S?$`. A rule may
-also use a one-character class, for example
-`--loose-rule 'prefix:4=[WwXx]'`. Rules are applied in command-line order, so the
-last rule for the same position wins. Both the base pattern, effective pattern,
-and complete rule list are saved in JSON. Direct `?` and `[abc]` tokens inside
-`--prefix` and `--suffix` continue to work as before.
+This produces the fixed-width pattern `^TAB??...XYZ???$`. Each `?` accepts one
+Base58 character. For a restricted position, use a class directly, such as
+`--prefix 'AB[17][2K]'`.
+
+### Multi-GPU execution
+
+The C++ benchmark accepts 4x4, 3x5, and other fixed-width requests up to four
+prefix tokens and six suffix tokens. It uses all visible CUDA GPUs concurrently
+by default. Select specific CUDA device ordinals with `--devices 0,1`, or state
+the default explicitly with `--devices all`:
+
+```bash
+build/cpp/tron_gpu_benchmark \
+  --prefix 'AB??' \
+  --suffix 'XYZ???' \
+  --case-mode ignore \
+  --devices 0,1 \
+  --warmup-seconds 10 \
+  --benchmark-seconds 60 \
+  --output results/two-gpu-AB-XYZ.json
+```
+
+Each GPU owns an independent CUDA context and independently seeded candidate
+chains. GPU workers run in parallel host threads. The report contains each
+device's measured rate and uses the sum of those rates for the projected search
+times. Use `--devices 0` when a single-GPU baseline is required.
 
 ## Run the real GPU benchmark
 

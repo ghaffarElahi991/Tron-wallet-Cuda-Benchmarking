@@ -80,15 +80,24 @@ std::string compile_ptx(const std::string& source, const std::string& source_nam
 
 }  // namespace
 
-CudaContext::CudaContext() {
+int cuda_device_count() {
   cuda_check(cuInit(0), "cuInit");
   int count = 0;
   cuda_check(cuDeviceGetCount(&count), "cuDeviceGetCount");
+  return count;
+}
+
+CudaContext::CudaContext(int device_ordinal) {
+  const int count = cuda_device_count();
   if (count < 1) throw std::runtime_error("no CUDA GPU detected");
-  cuda_check(cuDeviceGet(&device_, 0), "cuDeviceGet");
+  if (device_ordinal < 0 || device_ordinal >= count) {
+    throw std::invalid_argument("CUDA device ordinal is outside the visible device range");
+  }
+  cuda_check(cuDeviceGet(&device_, device_ordinal), "cuDeviceGet");
   cuda_check(cuDevicePrimaryCtxRetain(&context_, device_), "cuDevicePrimaryCtxRetain");
   try {
     cuda_check(cuCtxSetCurrent(context_), "cuCtxSetCurrent");
+    info_.ordinal = device_ordinal;
     std::array<char, 256> name{};
     cuda_check(cuDeviceGetName(name.data(), static_cast<int>(name.size()), device_),
                "cuDeviceGetName");

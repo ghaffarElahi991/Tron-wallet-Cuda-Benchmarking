@@ -22,15 +22,22 @@ if [[ ! -f "${vendor_dir}/requirements.txt" || ! -f "${vendor_dir}/kernels.cu" ]
   exit 1
 fi
 
-if git -C "${vendor_dir}" apply --reverse --check --ignore-space-change \
-  "${kernel_patch}" >/dev/null 2>&1; then
-  echo "CUDA matcher patch is already applied."
-elif git -C "${vendor_dir}" apply --check --ignore-space-change \
-  "${kernel_patch}" >/dev/null 2>&1; then
-  echo "Applying CUDA fixed-width matcher patch..."
-  git -C "${vendor_dir}" apply --ignore-space-change "${kernel_patch}"
+if git -C "${vendor_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "${vendor_dir}" apply --reverse --check --ignore-space-change \
+    "${kernel_patch}" >/dev/null 2>&1; then
+    echo "CUDA matcher patch is already applied."
+  elif git -C "${vendor_dir}" apply --check --ignore-space-change \
+    "${kernel_patch}" >/dev/null 2>&1; then
+    echo "Applying CUDA fixed-width matcher patch..."
+    git -C "${vendor_dir}" apply --ignore-space-change "${kernel_patch}"
+  else
+    echo "Cannot apply CUDA matcher patch; vendor source has unexpected changes." >&2
+    exit 1
+  fi
+elif grep -q "u64 prefix_masks\[4\]" "${vendor_dir}/kernels.cu"; then
+  echo "CUDA matcher patch is already present in the packaged source."
 else
-  echo "Cannot apply CUDA matcher patch; vendor source has unexpected changes." >&2
+  echo "Packaged CUDA kernel does not contain the fixed-width matcher." >&2
   exit 1
 fi
 

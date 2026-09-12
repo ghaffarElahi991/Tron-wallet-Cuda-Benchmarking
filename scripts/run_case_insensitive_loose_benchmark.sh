@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 benchmark="${project_dir}/build/cpp/tron_gpu_benchmark"
-output="${project_dir}/results/rtx4050-direct-loose.json"
+output="${project_dir}/results/multi-gpu-AB-XYZ-loose.json"
 
 if [[ ! -x "${benchmark}" ]]; then
   echo "Benchmark binary not found. Build it first with:" >&2
@@ -14,9 +14,10 @@ fi
 mkdir -p "${project_dir}/results"
 
 "${benchmark}" \
-  --prefix 'New?' \
-  --suffix 'adr?S?' \
+  --prefix 'AB??' \
+  --suffix 'XYZ???' \
   --case-mode ignore \
+  --devices all \
   --warmup-seconds 10 \
   --benchmark-seconds 60 \
   --validation-hits 20 \
