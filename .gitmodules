@@ -1,0 +1,3 @@
+[submodule "vendor/tron_vanity_cuda"]
+	path = vendor/tron_vanity_cuda
+	url = https://github.com/Daniel-Wu-1/tron_vanity_address_generation.git

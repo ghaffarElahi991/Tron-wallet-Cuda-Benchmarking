@@ -1,0 +1,74 @@
+diff --git a/kernels.cu b/kernels.cu
+index 734b79c..fb0d1ac 100644
+--- a/kernels.cu
++++ b/kernels.cu
+@@ -576,13 +576,33 @@ __device__ void base58_encode_25(char out[34], const u8 in[25]) {
+     }
+ }
+ 
+-struct PatternParams {
+-    int prefix_len;
+-    int suffix_len;
+-    int repeat_n;
+-    char prefix[40];
+-    char suffix[40];
+-};
++// Milestone-specific fixed-width matcher. The leading TRON 'T' is implicit;
++// prefix masks begin at address character 1. Each bit is one Base58 symbol.
++// Keeping this structure at 96 bytes preserves the original kernel's compact
++// by-value pattern load while allowing case folding, '?' and '[abc]' classes.
++struct PatternParams {
++    int prefix_len;
++    int suffix_len;
++    int repeat_n;
++    int reserved;
++    u64 prefix_masks[4];
++    u64 suffix_masks[6];
++};
++
++__device__ __forceinline__ int b58_index(char c) {
++    if (c >= '1' && c <= '9') return (int)(c - '1');
++    if (c >= 'A' && c <= 'H') return 9 + (int)(c - 'A');
++    if (c >= 'J' && c <= 'N') return 17 + (int)(c - 'J');
++    if (c >= 'P' && c <= 'Z') return 22 + (int)(c - 'P');
++    if (c >= 'a' && c <= 'k') return 33 + (int)(c - 'a');
++    if (c >= 'm' && c <= 'z') return 44 + (int)(c - 'm');
++    return -1;
++}
++
++__device__ __forceinline__ bool mask_accepts(u64 mask, char c) {
++    int index = b58_index(c);
++    return index >= 0 && ((mask >> index) & 1ULL) != 0ULL;
++}
+ 
+ struct MatchRecord {
+     u32  thread_id;
+@@ -659,8 +679,8 @@ extern "C" __global__ void vanity_kernel(
+             int sfx_len = params.suffix_len;
+             int pfx_len = params.prefix_len;
+             int rep_n = params.repeat_n;
+-            if (sfx_len < 0 || sfx_len > 34) sfx_len = 0;
+-            if (pfx_len < 0 || pfx_len > 34) pfx_len = 0;
++            if (sfx_len < 0 || sfx_len > 6) sfx_len = 0;
++            if (pfx_len < 0 || pfx_len > 4) pfx_len = 0;
+             if (rep_n < 0 || rep_n > 34) rep_n = 0;
+ 
+             int tail_k = sfx_len > rep_n ? sfx_len : rep_n;
+@@ -674,7 +694,7 @@ extern "C" __global__ void vanity_kernel(
+                 if (sfx_len > 0) {
+                     for (int i = 0; i < sfx_len; i++) {
+ 
+-                        if (tail_chars[sfx_len - 1 - i] != params.suffix[i]) {
++                        if (!mask_accepts(params.suffix_masks[i], tail_chars[sfx_len - 1 - i])) {
+                             ok = false; break;
+                         }
+                     }
+@@ -695,7 +715,7 @@ extern "C" __global__ void vanity_kernel(
+ 
+             if (pfx_len > 0) {
+                 for (int i = 0; i < pfx_len; i++) {
+-                    if (addr[i] != params.prefix[i]) { ok = false; break; }
++                    if (!mask_accepts(params.prefix_masks[i], addr[i + 1])) { ok = false; break; }
+                 }
+             }
+ 
