@@ -66,20 +66,20 @@ Base58 character. For a restricted position, use a class directly, such as
 
 ### Multi-GPU execution
 
-The C++ benchmark accepts 4x4, 3x5, and other fixed-width requests up to four
+The C++ benchmark accepts 3x4, 4x3, and other fixed-width requests up to four
 prefix tokens and six suffix tokens. It uses all visible CUDA GPUs concurrently
 by default. Select specific CUDA device ordinals with `--devices 0,1`, or state
 the default explicitly with `--devices all`:
 
 ```bash
 build/cpp/tron_gpu_benchmark \
-  --prefix 'AB??' \
-  --suffix 'XYZ???' \
+  --prefix 'New' \
+  --suffix 'adre' \
   --case-mode ignore \
   --devices 0,1 \
   --warmup-seconds 10 \
   --benchmark-seconds 60 \
-  --output results/two-gpu-AB-XYZ.json
+  --output results/two-gpu-3x4.json
 ```
 
 Each GPU owns an independent CUDA context and independently seeded candidate
@@ -90,15 +90,15 @@ times. Use `--devices 0` when a single-GPU baseline is required.
 The convenience script requires the pattern size as its argument:
 
 ```bash
-# Prefix AB?? (4), suffix XY?? (4)
-bash scripts/run_case_insensitive_loose_benchmark.sh 4x4
+# Prefix New (3), suffix adre (4)
+bash scripts/run_case_insensitive_loose_benchmark.sh 3x4
 
-# Prefix AB? (3), suffix XYZ?? (5)
-bash scripts/run_case_insensitive_loose_benchmark.sh 3x5
+# Prefix Neww (4), suffix adr (3)
+bash scripts/run_case_insensitive_loose_benchmark.sh 4x3
 ```
 
-Results are written to `results/multi-gpu-4x4-loose.json` or
-`results/multi-gpu-3x5-loose.json`. The script enables `--debug-math`, which
+Results are written to `results/multi-gpu-3x4-loose.json` or
+`results/multi-gpu-4x3-loose.json`. The script enables `--debug-math`, which
 prints every probability factor, expected attempts, per-GPU rate equation,
 combined rate, and the mean/median/p95 latency calculations.
 
