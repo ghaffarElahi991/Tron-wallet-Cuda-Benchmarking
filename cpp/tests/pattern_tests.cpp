@@ -24,18 +24,15 @@ int main() {
   expect(loose.suffix_masks[3] == ((std::uint64_t{1} << 58U) - 1U), "suffix wildcard 1");
   expect(loose.suffix_masks[5] == ((std::uint64_t{1} << 58U) - 1U), "suffix wildcard 2");
 
-  const auto three_by_four = tron::compile_pattern("New", "adre", true, false);
-  expect(three_by_four.prefix_len == 3 && three_by_four.suffix_len == 4,
-         "3x4 requested pattern");
-  const auto four_by_three = tron::compile_pattern("Neww", "adr", true, false);
-  expect(four_by_three.prefix_len == 4 && four_by_three.suffix_len == 3,
-         "4x3 requested pattern");
-  const auto two_by_five = tron::compile_pattern("Ne", "adreS", true, false);
-  expect(two_by_five.prefix_len == 2 && two_by_five.suffix_len == 5,
-         "2x5 requested pattern");
-  const auto five_by_two = tron::compile_pattern("NewWa", "ad", true, false);
-  expect(five_by_two.prefix_len == 5 && five_by_two.suffix_len == 2,
-         "5x2 requested pattern");
+  const auto two_by_six = tron::compile_pattern("Ne", "adreSS", true, false);
+  expect(two_by_six.prefix_len == 2 && two_by_six.suffix_len == 6,
+         "2x6 requested pattern");
+  const auto three_by_five = tron::compile_pattern("New", "adreS", true, false);
+  expect(three_by_five.prefix_len == 3 && three_by_five.suffix_len == 5,
+         "3x5 requested pattern");
+  const auto four_by_four = tron::compile_pattern("NewW", "adre", true, false);
+  expect(four_by_four.prefix_len == 4 && four_by_four.suffix_len == 4,
+         "4x4 requested pattern");
 
   const auto parsed_prefix = tron::parse_fixed_pattern("Ab??", true);
   const auto parsed_suffix = tron::parse_fixed_pattern("Wxy?A?", true);

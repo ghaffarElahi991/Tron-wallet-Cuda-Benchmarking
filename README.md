@@ -66,20 +66,20 @@ Base58 character. For a restricted position, use a class directly, such as
 
 ### Multi-GPU execution
 
-The C++ benchmark accepts 2x5, 3x4, 4x3, 5x2, and other fixed-width requests up to five
-prefix tokens and six suffix tokens. It uses all visible CUDA GPUs concurrently
+The C++ benchmark accepts 2x6, 3x5, 4x4, and other fixed-width requests up to
+five prefix tokens and six suffix tokens. It uses all visible CUDA GPUs concurrently
 by default. Select specific CUDA device ordinals with `--devices 0,1`, or state
 the default explicitly with `--devices all`:
 
 ```bash
 build/cpp/tron_gpu_benchmark \
   --prefix 'New' \
-  --suffix 'adre' \
+  --suffix 'adreS' \
   --case-mode ignore \
   --devices 0,1 \
   --warmup-seconds 10 \
   --benchmark-seconds 60 \
-  --output results/two-gpu-3x4.json
+  --output results/two-gpu-3x5.json
 ```
 
 Each GPU owns an independent CUDA context and independently seeded candidate
@@ -90,21 +90,18 @@ times. Use `--devices 0` when a single-GPU baseline is required.
 The convenience script requires the pattern size as its argument:
 
 ```bash
-# Prefix Ne (2), suffix adreS (5)
-bash scripts/run_case_insensitive_loose_benchmark.sh 2x5
+# Prefix Ne (2), suffix adreSS (6)
+bash scripts/run_case_insensitive_loose_benchmark.sh 2x6
 
-# Prefix New (3), suffix adre (4)
-bash scripts/run_case_insensitive_loose_benchmark.sh 3x4
+# Prefix New (3), suffix adreS (5)
+bash scripts/run_case_insensitive_loose_benchmark.sh 3x5
 
-# Prefix Neww (4), suffix adr (3)
-bash scripts/run_case_insensitive_loose_benchmark.sh 4x3
-
-# Prefix NewWa (5), suffix ad (2)
-bash scripts/run_case_insensitive_loose_benchmark.sh 5x2
+# Prefix NewW (4), suffix adre (4)
+bash scripts/run_case_insensitive_loose_benchmark.sh 4x4
 ```
 
 Results are written to `results/multi-gpu-<size>-loose.json`, where `<size>` is
-`2x5`, `3x4`, `4x3`, or `5x2`. The script enables `--debug-math`, which
+`2x6`, `3x5`, or `4x4`. The script enables `--debug-math`, which
 prints every probability factor, expected attempts, per-GPU rate equation,
 combined rate, and the mean/median/p95 latency calculations.
 
