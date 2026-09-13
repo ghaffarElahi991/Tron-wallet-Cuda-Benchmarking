@@ -34,7 +34,7 @@ if git -C "${vendor_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Cannot apply CUDA matcher patch; vendor source has unexpected changes." >&2
     exit 1
   fi
-elif grep -q "u64 prefix_masks\[4\]" "${vendor_dir}/kernels.cu"; then
+elif grep -q "u64 prefix_masks\[5\]" "${vendor_dir}/kernels.cu"; then
   echo "CUDA matcher patch is already present in the packaged source."
 else
   echo "Packaged CUDA kernel does not contain the fixed-width matcher." >&2

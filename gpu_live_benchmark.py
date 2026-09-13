@@ -73,7 +73,7 @@ PATTERN_DTYPE = np.dtype(
         ("suffix_len", np.int32),
         ("repeat_n", np.int32),
         ("reserved", np.int32),
-        ("prefix_masks", np.uint64, 4),
+        ("prefix_masks", np.uint64, 5),
         ("suffix_masks", np.uint64, 6),
     ],
     align=True,
@@ -109,12 +109,12 @@ def compile_pattern(prefix: str, suffix: str, ignore_case: bool) -> np.ndarray:
 
 
 def compile_reduced_pattern(prefix: str, suffix: str, ignore_case: bool) -> np.ndarray:
-    """Compile a validation pattern up to 4x6, padding unused masks with zero."""
+    """Compile a validation pattern up to 5x6, padding unused masks with zero."""
 
     prefix_tokens = parse_fixed_pattern(prefix, ignore_case)
     suffix_tokens = parse_fixed_pattern(suffix, ignore_case)
-    if len(prefix_tokens) > 4 or len(suffix_tokens) > 6:
-        raise PatternError("validation pattern exceeds the 4x6 matcher capacity")
+    if len(prefix_tokens) > 5 or len(suffix_tokens) > 6:
+        raise PatternError("validation pattern exceeds the 5x6 matcher capacity")
     result = np.zeros(1, dtype=PATTERN_DTYPE)
     result["prefix_len"] = len(prefix_tokens)
     result["suffix_len"] = len(suffix_tokens)

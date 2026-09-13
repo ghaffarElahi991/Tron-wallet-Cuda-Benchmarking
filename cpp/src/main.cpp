@@ -137,7 +137,7 @@ class StartGate {
   if (!error.empty()) stream << "error: " << error << "\n\n";
   stream
       << "Usage: tron_gpu_benchmark --prefix PATTERN --suffix PATTERN [options]\n\n"
-      << "Pattern capacity: up to 4 prefix and 6 suffix tokens.\n"
+      << "Pattern capacity: up to 5 prefix and 6 suffix tokens.\n"
       << "Syntax: Base58 literals, ? wildcards, and [abc] classes.\n"
       << "The prefix starts after TRON's invariant leading T.\n\n"
       << "Options:\n"

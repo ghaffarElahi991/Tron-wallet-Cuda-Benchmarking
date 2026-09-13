@@ -5,12 +5,16 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 benchmark="${project_dir}/build/cpp/tron_gpu_benchmark"
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <3x4|4x3>" >&2
+  echo "Usage: $0 <2x5|3x4|4x3|5x2>" >&2
   exit 2
 fi
 
 pattern_size="$1"
 case "${pattern_size}" in
+  2x5)
+    prefix='Ne'
+    suffix='adreS'
+    ;;
   3x4)
     prefix='New'
     suffix='adre'
@@ -19,9 +23,13 @@ case "${pattern_size}" in
     prefix='Neww'
     suffix='adr'
     ;;
+  5x2)
+    prefix='NewWa'
+    suffix='ad'
+    ;;
   *)
     echo "Unsupported pattern size: ${pattern_size}" >&2
-    echo "Choose either 3x4 or 4x3." >&2
+    echo "Choose one of: 2x5, 3x4, 4x3, or 5x2." >&2
     exit 2
     ;;
 esac

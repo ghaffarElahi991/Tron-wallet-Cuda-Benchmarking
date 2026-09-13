@@ -24,11 +24,11 @@ struct PatternParams {
   std::int32_t suffix_len{};
   std::int32_t repeat_n{};
   std::int32_t reserved{};
-  std::array<Token, 4> prefix_masks{};
+  std::array<Token, 5> prefix_masks{};
   std::array<Token, 6> suffix_masks{};
 };
 
-static_assert(sizeof(PatternParams) == 96, "CUDA pattern ABI changed");
+static_assert(sizeof(PatternParams) == 104, "CUDA pattern ABI changed");
 
 struct Probability {
   long double probability{};

@@ -112,11 +112,11 @@ PatternParams compile_pattern(std::string_view prefix, std::string_view suffix,
                               bool ignore_case, bool require_4x6) {
   const auto prefix_tokens = parse_fixed_pattern(prefix, ignore_case);
   const auto suffix_tokens = parse_fixed_pattern(suffix, ignore_case);
-  if (prefix_tokens.size() > 4U || suffix_tokens.size() > 6U ||
+  if (prefix_tokens.size() > 5U || suffix_tokens.size() > 6U ||
       (require_4x6 && (prefix_tokens.size() != 4U || suffix_tokens.size() != 6U))) {
     throw PatternError(require_4x6
                            ? "this milestone requires exactly four prefix tokens after T and six suffix tokens"
-                           : "validation pattern exceeds the 4x6 matcher capacity");
+                           : "validation pattern exceeds the 5x6 matcher capacity");
   }
   PatternParams result;
   result.prefix_len = static_cast<std::int32_t>(prefix_tokens.size());

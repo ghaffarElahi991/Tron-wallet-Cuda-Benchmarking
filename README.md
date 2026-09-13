@@ -66,7 +66,7 @@ Base58 character. For a restricted position, use a class directly, such as
 
 ### Multi-GPU execution
 
-The C++ benchmark accepts 3x4, 4x3, and other fixed-width requests up to four
+The C++ benchmark accepts 2x5, 3x4, 4x3, 5x2, and other fixed-width requests up to five
 prefix tokens and six suffix tokens. It uses all visible CUDA GPUs concurrently
 by default. Select specific CUDA device ordinals with `--devices 0,1`, or state
 the default explicitly with `--devices all`:
@@ -90,15 +90,21 @@ times. Use `--devices 0` when a single-GPU baseline is required.
 The convenience script requires the pattern size as its argument:
 
 ```bash
+# Prefix Ne (2), suffix adreS (5)
+bash scripts/run_case_insensitive_loose_benchmark.sh 2x5
+
 # Prefix New (3), suffix adre (4)
 bash scripts/run_case_insensitive_loose_benchmark.sh 3x4
 
 # Prefix Neww (4), suffix adr (3)
 bash scripts/run_case_insensitive_loose_benchmark.sh 4x3
+
+# Prefix NewWa (5), suffix ad (2)
+bash scripts/run_case_insensitive_loose_benchmark.sh 5x2
 ```
 
-Results are written to `results/multi-gpu-3x4-loose.json` or
-`results/multi-gpu-4x3-loose.json`. The script enables `--debug-math`, which
+Results are written to `results/multi-gpu-<size>-loose.json`, where `<size>` is
+`2x5`, `3x4`, `4x3`, or `5x2`. The script enables `--debug-math`, which
 prints every probability factor, expected attempts, per-GPU rate equation,
 combined rate, and the mean/median/p95 latency calculations.
 
@@ -152,7 +158,7 @@ python3 gpu_live_benchmark.py \
 The CUDA implementation is based on the MIT-licensed
 `Daniel-Wu-1/tron_vanity_address_generation` source at commit
 `59dfbc1d8d971898c360af8912a9f22c6fd1de7e`; the local kernel modification adds
-four prefix and six suffix bitmasks for case-insensitive literals, `?` wildcards,
+five prefix and six suffix bitmasks for case-insensitive literals, `?` wildcards,
 and `[abc]` character classes.
 
 ## Pattern contract

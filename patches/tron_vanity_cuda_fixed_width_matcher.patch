@@ -15,14 +15,14 @@ index 734b79c..fb0d1ac 100644
 -};
 +// Milestone-specific fixed-width matcher. The leading TRON 'T' is implicit;
 +// prefix masks begin at address character 1. Each bit is one Base58 symbol.
-+// Keeping this structure at 96 bytes preserves the original kernel's compact
-+// by-value pattern load while allowing case folding, '?' and '[abc]' classes.
++// The structure supports five prefix and six suffix masks while allowing case
++// folding, '?' wildcards, and '[abc]' classes.
 +struct PatternParams {
 +    int prefix_len;
 +    int suffix_len;
 +    int repeat_n;
 +    int reserved;
-+    u64 prefix_masks[4];
++    u64 prefix_masks[5];
 +    u64 suffix_masks[6];
 +};
 +
@@ -50,7 +50,7 @@ index 734b79c..fb0d1ac 100644
 -            if (sfx_len < 0 || sfx_len > 34) sfx_len = 0;
 -            if (pfx_len < 0 || pfx_len > 34) pfx_len = 0;
 +            if (sfx_len < 0 || sfx_len > 6) sfx_len = 0;
-+            if (pfx_len < 0 || pfx_len > 4) pfx_len = 0;
++            if (pfx_len < 0 || pfx_len > 5) pfx_len = 0;
              if (rep_n < 0 || rep_n > 34) rep_n = 0;
  
              int tail_k = sfx_len > rep_n ? sfx_len : rep_n;
